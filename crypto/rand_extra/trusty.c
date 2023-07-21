@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, Google Inc.
+/* Copyright (c) 2023, Google Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -12,31 +12,27 @@
  * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
 
-package testconfig
+#include <openssl/rand.h>
 
-import (
-	"encoding/json"
-	"os"
-)
+#include "../fipsmodule/rand/internal.h"
 
-type Test struct {
-	Cmd     []string `json:"cmd"`
-	Env     []string `json:"env"`
-	SkipSDE bool     `json:"skip_sde"`
-	Shard   bool     `json:"shard"`
+#if defined(OPENSSL_RAND_TRUSTY)
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <sys/types.h>
+#include <uapi/err.h>
+
+#include <lib/rng/trusty_rng.h>
+
+void CRYPTO_sysrand(uint8_t *out, size_t requested) {
+  if (trusty_rng_hw_rand(out, requested) != NO_ERROR) {
+    abort();
+  }
 }
 
-func ParseTestConfig(filename string) ([]Test, error) {
-	in, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer in.Close()
-
-	decoder := json.NewDecoder(in)
-	var result []Test
-	if err := decoder.Decode(&result); err != nil {
-		return nil, err
-	}
-	return result, nil
+void CRYPTO_sysrand_for_seed(uint8_t *out, size_t requested) {
+  CRYPTO_sysrand(out, requested);
 }
+
+#endif  // OPENSSL_RAND_TRUSTY

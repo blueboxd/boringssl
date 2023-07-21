@@ -1,4 +1,4 @@
-/* Copyright (c) 2017, Google Inc.
+/* Copyright (c) 2023, Google Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,19 +16,19 @@
 
 #include "../fipsmodule/rand/internal.h"
 
-#if defined(OPENSSL_RAND_FUCHSIA)
-
-#include <limits.h>
+#if defined(OPENSSL_RAND_IOS)
 #include <stdlib.h>
 
-#include <zircon/syscalls.h>
+#include <CommonCrypto/CommonRandom.h>
 
 void CRYPTO_sysrand(uint8_t *out, size_t requested) {
-  zx_cprng_draw(out, requested);
+  if (CCRandomGenerateBytes(out, requested) != kCCSuccess) {
+    abort();
+  }
 }
 
 void CRYPTO_sysrand_for_seed(uint8_t *out, size_t requested) {
   CRYPTO_sysrand(out, requested);
 }
 
-#endif  // OPENSSL_RAND_FUCHSIA
+#endif  // OPENSSL_RAND_IOS
