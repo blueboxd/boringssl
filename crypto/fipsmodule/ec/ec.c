@@ -520,9 +520,9 @@ EC_GROUP *EC_GROUP_new_by_curve_name(int nid) {
     return NULL;
   }
 
-  CRYPTO_STATIC_MUTEX_lock_read(built_in_groups_lock_bss_get());
+  CRYPTO_MUTEX_lock_read(built_in_groups_lock_bss_get());
   EC_GROUP *ret = *group_ptr;
-  CRYPTO_STATIC_MUTEX_unlock_read(built_in_groups_lock_bss_get());
+  CRYPTO_MUTEX_unlock_read(built_in_groups_lock_bss_get());
   if (ret != NULL) {
     return ret;
   }
@@ -533,7 +533,7 @@ EC_GROUP *EC_GROUP_new_by_curve_name(int nid) {
   }
 
   EC_GROUP *to_free = NULL;
-  CRYPTO_STATIC_MUTEX_lock_write(built_in_groups_lock_bss_get());
+  CRYPTO_MUTEX_lock_write(built_in_groups_lock_bss_get());
   if (*group_ptr == NULL) {
     *group_ptr = ret;
     // Filling in |ret->curve_name| makes |EC_GROUP_free| and |EC_GROUP_dup|
@@ -543,7 +543,7 @@ EC_GROUP *EC_GROUP_new_by_curve_name(int nid) {
     to_free = ret;
     ret = *group_ptr;
   }
-  CRYPTO_STATIC_MUTEX_unlock_write(built_in_groups_lock_bss_get());
+  CRYPTO_MUTEX_unlock_write(built_in_groups_lock_bss_get());
 
   EC_GROUP_free(to_free);
   return ret;
@@ -1074,8 +1074,10 @@ int ec_point_mul_scalar_base(const EC_GROUP *group, EC_JACOBIAN *r,
   group->meth->mul_base(group, r, scalar);
 
   // Check the result is on the curve to defend against fault attacks or bugs.
-  // This has negligible cost compared to the multiplication.
-  if (!ec_GFp_simple_is_on_curve(group, r)) {
+  // This has negligible cost compared to the multiplication. This can only
+  // happen on bug or CPU fault, so it okay to leak this. The alternative would
+  // be to proceed with bad data.
+  if (!constant_time_declassify_int(ec_GFp_simple_is_on_curve(group, r))) {
     OPENSSL_PUT_ERROR(EC, ERR_R_INTERNAL_ERROR);
     return 0;
   }

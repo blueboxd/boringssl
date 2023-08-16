@@ -165,6 +165,10 @@
 #define OPENSSL_C11_ATOMIC
 #endif
 
+#if defined(OPENSSL_C11_ATOMIC)
+#include <stdatomic.h>
+#endif
+
 // Older MSVC does not support C11 atomics, so we fallback to the Windows APIs.
 // When both are available (e.g. clang-cl), we prefer the C11 ones. The Windows
 // APIs don't allow some operations to be implemented as efficiently. This can
@@ -175,10 +179,6 @@
 #define OPENSSL_WINDOWS_ATOMIC
 #endif
 #endif  // !__cplusplus
-
-#if defined(OPENSSL_C11_ATOMIC)
-#include <stdatomic.h>
-#endif
 
 #if defined(OPENSSL_WINDOWS_THREADS) || defined(OPENSSL_WINDOWS_ATOMIC)
 OPENSSL_MSVC_PRAGMA(warning(push, 3))
@@ -265,15 +265,15 @@ OPENSSL_INLINE void OPENSSL_reset_malloc_counter_for_testing(void) {}
 // Pointer utility functions.
 
 // buffers_alias returns one if |a| and |b| alias and zero otherwise.
-static inline int buffers_alias(const uint8_t *a, size_t a_len,
-                                const uint8_t *b, size_t b_len) {
+static inline int buffers_alias(const void *a, size_t a_bytes,
+                                const void *b, size_t b_bytes) {
   // Cast |a| and |b| to integers. In C, pointer comparisons between unrelated
   // objects are undefined whereas pointer to integer conversions are merely
   // implementation-defined. We assume the implementation defined it in a sane
   // way.
   uintptr_t a_u = (uintptr_t)a;
   uintptr_t b_u = (uintptr_t)b;
-  return a_u + a_len > b_u && b_u + b_len > a_u;
+  return a_u + a_bytes > b_u && b_u + b_bytes > a_u;
 }
 
 // align_pointer returns |ptr|, advanced to |alignment|. |alignment| must be a
@@ -359,6 +359,9 @@ static inline uint64_t value_barrier_u64(uint64_t a) {
 #endif
   return a;
 }
+
+// |value_barrier_u8| could be defined as above, but compilers other than
+// clang seem to still materialize 0x00..00MM instead of reusing 0x??..??MM.
 
 // constant_time_msb_w returns the given value with the MSB copied to all the
 // other bits.
@@ -476,16 +479,23 @@ static inline crypto_word_t constant_time_select_w(crypto_word_t mask,
   // to a cmov, it sometimes further transforms it into a branch, which we do
   // not want.
   //
-  // Adding barriers to both |mask| and |~mask| breaks the relationship between
-  // the two, which makes the compiler stick with bitmasks.
-  return (value_barrier_w(mask) & a) | (value_barrier_w(~mask) & b);
+  // Hiding the value of the mask from the compiler evades this transformation.
+  mask = value_barrier_w(mask);
+  return (mask & a) | (~mask & b);
 }
 
 // constant_time_select_8 acts like |constant_time_select| but operates on
 // 8-bit values.
-static inline uint8_t constant_time_select_8(uint8_t mask, uint8_t a,
+static inline uint8_t constant_time_select_8(crypto_word_t mask, uint8_t a,
                                              uint8_t b) {
-  return (uint8_t)(constant_time_select_w(mask, a, b));
+  // |mask| is a word instead of |uint8_t| to avoid materializing 0x000..0MM
+  // Making both |mask| and its value barrier |uint8_t| would allow the compiler
+  // to materialize 0x????..?MM instead, but only clang is that clever.
+  // However, vectorization of bitwise operations seems to work better on
+  // |uint8_t| than a mix of |uint64_t| and |uint8_t|, so |m| is cast to
+  // |uint8_t| after the value barrier but before the bitwise operations.
+  uint8_t m = value_barrier_w(mask);
+  return (m & a) | (~m & b);
 }
 
 // constant_time_select_int acts like |constant_time_select| but operates on
@@ -493,6 +503,34 @@ static inline uint8_t constant_time_select_8(uint8_t mask, uint8_t a,
 static inline int constant_time_select_int(crypto_word_t mask, int a, int b) {
   return (int)(constant_time_select_w(mask, (crypto_word_t)(a),
                                       (crypto_word_t)(b)));
+}
+
+// constant_time_conditional_memcpy copies |n| bytes from |src| to |dst| if
+// |mask| is 0xff..ff and does nothing if |mask| is 0. The |n|-byte memory
+// ranges at |dst| and |src| must not overlap, as when calling |memcpy|.
+static inline void constant_time_conditional_memcpy(void *dst, const void *src,
+                                                    const size_t n,
+                                                    const crypto_word_t mask) {
+  assert(!buffers_alias(dst, n, src, n));
+  uint8_t *out = (uint8_t *)dst;
+  const uint8_t *in = (const uint8_t *)src;
+  for (size_t i = 0; i < n; i++) {
+    out[i] = constant_time_select_8(mask, in[i], out[i]);
+  }
+}
+
+// constant_time_conditional_memxor xors |n| bytes from |src| to |dst| if
+// |mask| is 0xff..ff and does nothing if |mask| is 0. The |n|-byte memory
+// ranges at |dst| and |src| must not overlap, as when calling |memcpy|.
+static inline void constant_time_conditional_memxor(void *dst, const void *src,
+                                                    const size_t n,
+                                                    const crypto_word_t mask) {
+  assert(!buffers_alias(dst, n, src, n));
+  uint8_t *out = (uint8_t *)dst;
+  const uint8_t *in = (const uint8_t *)src;
+  for (size_t i = 0; i < n; i++) {
+    out[i] ^= value_barrier_w(mask) & in[i];
+  }
 }
 
 #if defined(BORINGSSL_CONSTANT_TIME_VALIDATION)
@@ -697,37 +735,24 @@ OPENSSL_EXPORT int CRYPTO_refcount_dec_and_test_zero(CRYPTO_refcount_t *count);
 
 
 // Locks.
-//
-// Two types of locks are defined: |CRYPTO_MUTEX|, which can be used in
-// structures as normal, and |struct CRYPTO_STATIC_MUTEX|, which can be used as
-// a global lock. A global lock must be initialised to the value
-// |CRYPTO_STATIC_MUTEX_INIT|.
-//
-// |CRYPTO_MUTEX| can appear in public structures and so is defined in
-// thread.h as a structure large enough to fit the real type. The global lock is
-// a different type so it may be initialized with platform initializer macros.
 
 #if !defined(OPENSSL_THREADS)
-struct CRYPTO_STATIC_MUTEX {
+typedef struct crypto_mutex_st {
   char padding;  // Empty structs have different sizes in C and C++.
-};
-#define CRYPTO_STATIC_MUTEX_INIT { 0 }
+} CRYPTO_MUTEX;
+#define CRYPTO_MUTEX_INIT { 0 }
 #elif defined(OPENSSL_WINDOWS_THREADS)
-struct CRYPTO_STATIC_MUTEX {
-  SRWLOCK lock;
-};
-#define CRYPTO_STATIC_MUTEX_INIT { SRWLOCK_INIT }
+typedef SRWLOCK CRYPTO_MUTEX;
+#define CRYPTO_MUTEX_INIT SRWLOCK_INIT
 #elif defined(OPENSSL_PTHREADS)
-struct CRYPTO_STATIC_MUTEX {
-  pthread_rwlock_t lock;
-};
-#define CRYPTO_STATIC_MUTEX_INIT { PTHREAD_RWLOCK_INITIALIZER }
+typedef pthread_rwlock_t CRYPTO_MUTEX;
+#define CRYPTO_MUTEX_INIT PTHREAD_RWLOCK_INITIALIZER
 #else
 #error "Unknown threading library"
 #endif
 
 // CRYPTO_MUTEX_init initialises |lock|. If |lock| is a static variable, use a
-// |CRYPTO_STATIC_MUTEX|.
+// |CRYPTO_MUTEX_INIT|.
 OPENSSL_EXPORT void CRYPTO_MUTEX_init(CRYPTO_MUTEX *lock);
 
 // CRYPTO_MUTEX_lock_read locks |lock| such that other threads may also have a
@@ -746,28 +771,6 @@ OPENSSL_EXPORT void CRYPTO_MUTEX_unlock_write(CRYPTO_MUTEX *lock);
 
 // CRYPTO_MUTEX_cleanup releases all resources held by |lock|.
 OPENSSL_EXPORT void CRYPTO_MUTEX_cleanup(CRYPTO_MUTEX *lock);
-
-// CRYPTO_STATIC_MUTEX_lock_read locks |lock| such that other threads may also
-// have a read lock, but none may have a write lock. The |lock| variable does
-// not need to be initialised by any function, but must have been statically
-// initialised with |CRYPTO_STATIC_MUTEX_INIT|.
-OPENSSL_EXPORT void CRYPTO_STATIC_MUTEX_lock_read(
-    struct CRYPTO_STATIC_MUTEX *lock);
-
-// CRYPTO_STATIC_MUTEX_lock_write locks |lock| such that no other thread has
-// any type of lock on it.  The |lock| variable does not need to be initialised
-// by any function, but must have been statically initialised with
-// |CRYPTO_STATIC_MUTEX_INIT|.
-OPENSSL_EXPORT void CRYPTO_STATIC_MUTEX_lock_write(
-    struct CRYPTO_STATIC_MUTEX *lock);
-
-// CRYPTO_STATIC_MUTEX_unlock_read unlocks |lock| for reading.
-OPENSSL_EXPORT void CRYPTO_STATIC_MUTEX_unlock_read(
-    struct CRYPTO_STATIC_MUTEX *lock);
-
-// CRYPTO_STATIC_MUTEX_unlock_write unlocks |lock| for writing.
-OPENSSL_EXPORT void CRYPTO_STATIC_MUTEX_unlock_write(
-    struct CRYPTO_STATIC_MUTEX *lock);
 
 #if defined(__cplusplus)
 extern "C++" {
@@ -850,22 +853,25 @@ OPENSSL_EXPORT int CRYPTO_set_thread_local(
 
 typedef struct crypto_ex_data_func_st CRYPTO_EX_DATA_FUNCS;
 
-DECLARE_STACK_OF(CRYPTO_EX_DATA_FUNCS)
-
 // CRYPTO_EX_DATA_CLASS tracks the ex_indices registered for a type which
 // supports ex_data. It should defined as a static global within the module
 // which defines that type.
 typedef struct {
-  struct CRYPTO_STATIC_MUTEX lock;
-  STACK_OF(CRYPTO_EX_DATA_FUNCS) *meth;
+  CRYPTO_MUTEX lock;
+  // funcs is a linked list of |CRYPTO_EX_DATA_FUNCS| structures. It may be
+  // traversed without serialization only up to |num_funcs|. last points to the
+  // final entry of |funcs|, or NULL if empty.
+  CRYPTO_EX_DATA_FUNCS *funcs, *last;
+  // num_funcs is the number of entries in |funcs|.
+  CRYPTO_atomic_u32 num_funcs;
   // num_reserved is one if the ex_data index zero is reserved for legacy
   // |TYPE_get_app_data| functions.
   uint8_t num_reserved;
 } CRYPTO_EX_DATA_CLASS;
 
-#define CRYPTO_EX_DATA_CLASS_INIT {CRYPTO_STATIC_MUTEX_INIT, NULL, 0}
+#define CRYPTO_EX_DATA_CLASS_INIT {CRYPTO_MUTEX_INIT, NULL, NULL, 0, 0}
 #define CRYPTO_EX_DATA_CLASS_INIT_WITH_APP_DATA \
-    {CRYPTO_STATIC_MUTEX_INIT, NULL, 1}
+    {CRYPTO_MUTEX_INIT, NULL, NULL, 0, 1}
 
 // CRYPTO_get_ex_new_index allocates a new index for |ex_data_class| and writes
 // it to |*out_index|. Each class of object should provide a wrapper function
