@@ -353,14 +353,16 @@ set(
   pki/crl.cc
   pki/encode_values.cc
   pki/extended_key_usage.cc
-  pki/fillins/base64.cc
+  pki/fillins/fillins_base64.cc
   pki/fillins/ip_address.cc
   pki/fillins/openssl_util.cc
-  pki/fillins/string_util.cc
+  pki/fillins/fillins_string_util.cc
   pki/fillins/utf_string_conversions.cc
   pki/general_names.cc
   pki/input.cc
   pki/name_constraints.cc
+  pki/ocsp.cc
+  pki/ocsp_verify_result.cc
   pki/parse_certificate.cc
   pki/parse_name.cc
   pki/parse_values.cc
@@ -397,7 +399,7 @@ set(
   pki/mock_signature_verify_cache.cc
   pki/name_constraints_unittest.cc
   pki/nist_pkits_unittest.cc
-  #  pki/ocsp_unittest.cc           # Not sure we will keep this here..
+  pki/ocsp_unittest.cc
   pki/parse_certificate_unittest.cc
   pki/parse_name_unittest.cc
   pki/parse_values_unittest.cc
