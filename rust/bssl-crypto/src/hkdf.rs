@@ -45,7 +45,7 @@ impl<M: Md> Hkdf<M> {
         Self {
             salt: salt.map(Vec::from),
             ikm: Vec::from(ikm),
-            _marker: PhantomData::default(),
+            _marker: PhantomData,
         }
     }
 
@@ -94,6 +94,12 @@ impl<M: Md> Hkdf<M> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::unwrap_used
+)]
 mod tests {
     use crate::hkdf::{HkdfSha256, HkdfSha512};
     use crate::test_helpers::{decode_hex, decode_hex_into_vec};
