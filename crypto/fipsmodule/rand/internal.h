@@ -29,10 +29,7 @@ extern "C" {
 #if defined(BORINGSSL_UNSAFE_DETERMINISTIC_MODE)
 #define OPENSSL_RAND_DETERMINISTIC
 #elif defined(OPENSSL_TRUSTY)
-// TODO(b/291102972): This should define OPENSSL_RAND_TRUSTY to activate the
-// Trusty RNG implementation. However, due to a different, non-Trusty target
-// incorrectly defining __TRUSTY__, things will break if we follow our standard
-// pattern here.
+#define OPENSSL_RAND_TRUSTY
 #elif defined(OPENSSL_WINDOWS)
 #define OPENSSL_RAND_WINDOWS
 #elif defined(OPENSSL_LINUX)
@@ -43,7 +40,7 @@ extern "C" {
 #else
 // By default if you are integrating BoringSSL we expect you to
 // provide getentropy from the <unistd.h> header file.
-#define OPENSSL_RAND_GETENTROPY
+#define OPENSSL_RAND_URANDOM
 #endif
 
 // RAND_bytes_with_additional_data samples from the RNG after mixing 32 bytes
