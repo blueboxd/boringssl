@@ -13,13 +13,16 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use std::marker::PhantomData;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
 
 use crate::{
     ec::{Curve, EcKey},
     pkey::{Pkey, PkeyCtx},
     CSliceMut, ForeignType,
 };
+
+pub use crate::ec::P256;
 
 /// Private key used in a elliptic curve Diffie-Hellman.
 pub struct PrivateKey<C: Curve> {
