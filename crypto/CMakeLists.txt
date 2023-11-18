@@ -175,7 +175,7 @@ add_library(
   ex_data.c
   hpke/hpke.c
   hrss/hrss.c
-  kyber/keccak.c
+  keccak/keccak.c
   kyber/kyber.c
   lhash/lhash.c
   mem.c
@@ -211,6 +211,13 @@ add_library(
   rsa_extra/rsa_asn1.c
   rsa_extra/rsa_crypt.c
   rsa_extra/rsa_print.c
+  spx/address.c
+  spx/fors.c
+  spx/merkle.c
+  spx/spx.c
+  spx/thash.c
+  spx/spx_util.c
+  spx/wots.c
   stack/stack.c
   siphash/siphash.c
   thread.c
