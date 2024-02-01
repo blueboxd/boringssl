@@ -105,7 +105,6 @@ struct X509_name_st {
   STACK_OF(X509_NAME_ENTRY) *entries;
   int modified;  // true if 'bytes' needs to be built
   BUF_MEM *bytes;
-  // unsigned long hash; Keep the hash around for lookups
   unsigned char *canon_enc;
   int canon_enclen;
 } /* X509_NAME */;
@@ -171,7 +170,6 @@ struct x509_st {
   uint32_t ex_flags;
   uint32_t ex_kusage;
   uint32_t ex_xkusage;
-  uint32_t ex_nscert;
   ASN1_OCTET_STRING *skid;
   AUTHORITY_KEYID *akid;
   STACK_OF(DIST_POINT) *crldp;
@@ -272,6 +270,14 @@ struct X509_crl_st {
 // 5280) and C type is |X509_CRL*|.
 DECLARE_ASN1_ITEM(X509_CRL)
 
+// GENERAL_NAME is an |ASN1_ITEM| whose ASN.1 type is GeneralName and C type is
+// |GENERAL_NAME*|.
+DECLARE_ASN1_ITEM(GENERAL_NAME)
+
+// GENERAL_NAMES is an |ASN1_ITEM| whose ASN.1 type is SEQUENCE OF GeneralName
+// and C type is |GENERAL_NAMES*|, aka |STACK_OF(GENERAL_NAME)*|.
+DECLARE_ASN1_ITEM(GENERAL_NAMES)
+
 struct X509_VERIFY_PARAM_st {
   int64_t check_time;               // POSIX time to use
   unsigned long flags;              // Various verify flags
@@ -318,6 +324,8 @@ struct x509_lookup_method_st {
                         X509_OBJECT *ret);
 } /* X509_LOOKUP_METHOD */;
 
+DEFINE_STACK_OF(X509_LOOKUP)
+
 // This is used to hold everything.  It is used for all certificate
 // validation.  Once we have a certificate chain, the 'verify'
 // function is then called to actually check the cert chain.
@@ -333,13 +341,11 @@ struct x509_store_st {
 
   // Callbacks for various operations
   X509_STORE_CTX_verify_cb verify_cb;       // error callback
-  X509_STORE_CTX_get_issuer_fn get_issuer;  // get issuers cert from ctx
   X509_STORE_CTX_get_crl_fn get_crl;        // retrieve CRL
   X509_STORE_CTX_check_crl_fn check_crl;    // Check CRL validity
 
   CRYPTO_refcount_t references;
 } /* X509_STORE */;
-
 
 // This is the functions plus an instance of the local variables.
 struct x509_lookup_st {
@@ -361,27 +367,28 @@ struct x509_store_ctx_st {
   STACK_OF(X509_CRL) *crls;   // set of CRLs passed in
 
   X509_VERIFY_PARAM *param;
-  void *other_ctx;  // Other info for use with get_issuer()
+
+  // trusted_stack, if non-NULL, is a set of trusted certificates to consider
+  // instead of those from |X509_STORE|.
+  STACK_OF(X509) *trusted_stack;
 
   // Callbacks for various operations
   X509_STORE_CTX_verify_cb verify_cb;       // error callback
-  X509_STORE_CTX_get_issuer_fn get_issuer;  // get issuers cert from ctx
   X509_STORE_CTX_get_crl_fn get_crl;        // retrieve CRL
   X509_STORE_CTX_check_crl_fn check_crl;    // Check CRL validity
 
   // The following is built up
-  int valid;               // if 0, rebuild chain
-  int last_untrusted;      // index of last untrusted cert
-  STACK_OF(X509) *chain;   // chain of X509s - built up and trusted
+  int last_untrusted;     // index of last untrusted cert
+  STACK_OF(X509) *chain;  // chain of X509s - built up and trusted
 
   // When something goes wrong, this is why
   int error_depth;
   int error;
   X509 *current_cert;
-  X509 *current_issuer;   // cert currently being tested as valid issuer
   X509_CRL *current_crl;  // current CRL
 
-  int current_crl_score;         // score of current CRL
+  X509 *current_crl_issuer;  // issuer of current CRL
+  int current_crl_score;     // score of current CRL
 
   CRYPTO_EX_DATA ex_data;
 } /* X509_STORE_CTX */;
@@ -576,6 +583,10 @@ GENERAL_NAME *v2i_GENERAL_NAME_ex(GENERAL_NAME *out,
 GENERAL_NAMES *v2i_GENERAL_NAMES(const X509V3_EXT_METHOD *method,
                                  const X509V3_CTX *ctx,
                                  const STACK_OF(CONF_VALUE) *nval);
+
+// TODO(https://crbug.com/boringssl/407): Make |issuer| const once the
+// |X509_NAME| issue is resolved.
+int X509_check_akid(X509 *issuer, const AUTHORITY_KEYID *akid);
 
 
 #if defined(__cplusplus)

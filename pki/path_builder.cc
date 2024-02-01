@@ -9,8 +9,6 @@
 #include <set>
 #include <unordered_set>
 
-#include "fillins/log.h"
-
 #include <openssl/base.h>
 #include <openssl/sha.h>
 #include "cert_issuer_source.h"
@@ -34,8 +32,8 @@ using CertIssuerSources = std::vector<CertIssuerSource *>;
 // Returns a hex-encoded sha256 of the DER-encoding of |cert|.
 std::string FingerPrintParsedCertificate(const bssl::ParsedCertificate *cert) {
   uint8_t digest[SHA256_DIGEST_LENGTH];
-  SHA256(cert->der_cert().UnsafeData(), cert->der_cert().Length(), digest);
-  return bssl::string_util::HexEncode(digest, sizeof(digest));
+  SHA256(cert->der_cert().data(), cert->der_cert().size(), digest);
+  return bssl::string_util::HexEncode(digest);
 }
 
 // TODO(mattm): decide how much debug logging to keep.
@@ -246,9 +244,7 @@ CertIssuersIter::CertIssuersIter(
     CertIssuerSources *cert_issuer_sources, TrustStore *trust_store)
     : cert_(std::move(in_cert)),
       cert_issuer_sources_(cert_issuer_sources),
-      trust_store_(trust_store) {
-  DVLOG(2) << "CertIssuersIter created for " << CertDebugString(cert());
-}
+      trust_store_(trust_store) {}
 
 void CertIssuersIter::GetNextIssuer(IssuerEntry *out) {
   if (!did_initial_query_) {
@@ -286,8 +282,6 @@ void CertIssuersIter::GetNextIssuer(IssuerEntry *out) {
   if (HasCurrentIssuer()) {
     SortRemainingIssuers();
 
-    DVLOG(2) << "CertIssuersIter returning issuer " << cur_issuer_ << " of "
-             << issuers_.size() << " for " << CertDebugString(cert());
     // Still have issuers that haven't been returned yet, return the highest
     // priority one (head of remaining list). A reference to the returned issuer
     // is retained, since |present_issuers_| points to data owned by it.
@@ -295,8 +289,6 @@ void CertIssuersIter::GetNextIssuer(IssuerEntry *out) {
     return;
   }
 
-  DVLOG(2) << "CertIssuersIter reached the end of all available issuers for "
-           << CertDebugString(cert());
   // Reached the end of all available issuers.
   *out = IssuerEntry();
 }
@@ -329,7 +321,6 @@ void CertIssuersIter::DoAsyncIssuerQuery() {
     std::unique_ptr<CertIssuerSource::Request> request;
     cert_issuer_source->AsyncGetIssuersOf(cert(), &request);
     if (request) {
-      DVLOG(1) << "AsyncGetIssuersOf pending for " << CertDebugString(cert());
       pending_async_requests_.push_back(std::move(request));
     }
   }
@@ -630,7 +621,8 @@ bool CertPathIter::GetNextPath(ParsedCertificateList *out_certs,
         // trusted root.
         if (!cur_path_.Empty()) {
           if (delegate->IsDebugLogEnabled()) {
-            delegate->DebugLog("Issuer is a trust leaf, considering as UNSPECIFIED");
+            delegate->DebugLog(
+                "Issuer is a trust leaf, considering as UNSPECIFIED");
           }
           next_issuer_.trust = CertificateTrust::ForUnspecified();
         }
@@ -701,7 +693,8 @@ bool CertPathIter::GetNextPath(ParsedCertificateList *out_certs,
             std::move(next_issuer_.cert), &cert_issuer_sources_, trust_store_));
         next_issuer_ = IssuerEntry();
         if (delegate->IsDebugLogEnabled()) {
-          delegate->DebugLog("CertPathIter cur_path_ =\n" + cur_path_.PathDebugString());
+          delegate->DebugLog("CertPathIter cur_path_ =\n" +
+                             cur_path_.PathDebugString());
         }
         // Continue descending the tree.
         continue;
@@ -796,8 +789,12 @@ void CertPathBuilder::SetDepthLimit(uint32_t limit) {
   max_path_building_depth_ = limit;
 }
 
+void CertPathBuilder::SetValidPathLimit(size_t limit) {
+  valid_path_limit_ = limit;
+}
+
 void CertPathBuilder::SetExploreAllPaths(bool explore_all_paths) {
-  explore_all_paths_ = explore_all_paths;
+  valid_path_limit_ = explore_all_paths ? 0 : 1;
 }
 
 CertPathBuilder::Result CertPathBuilder::Run() {
@@ -827,6 +824,12 @@ CertPathBuilder::Result CertPathBuilder::Run() {
           result_path->errors.GetOtherErrors()->AddError(
               cert_errors::kInternalError);
         }
+
+        // Allow the delegate to do any processing or logging of the partial
+        // path. (This is for symmetry for the other CheckPathAfterVerification
+        // which also gets called on partial paths.)
+        delegate_->CheckPathAfterVerification(*this, result_path.get());
+
         AddResultPath(std::move(result_path));
       }
       out_result_.iteration_count = iteration_count;
@@ -849,11 +852,6 @@ CertPathBuilder::Result CertPathBuilder::Run() {
           &result_path->user_constrained_policy_set, &result_path->errors);
     }
 
-    if (delegate_->IsDebugLogEnabled()) {
-      delegate_->DebugLog("CertPathBuilder VerifyCertificateChain errors:\n" +
-                 result_path->errors.ToDebugString(result_path->certs));
-    }
-
     // Give the delegate a chance to add errors to the path.
     delegate_->CheckPathAfterVerification(*this, result_path.get());
 
@@ -861,10 +859,13 @@ CertPathBuilder::Result CertPathBuilder::Run() {
 
     AddResultPath(std::move(result_path));
 
-    if (path_is_good && !explore_all_paths_) {
-      out_result_.iteration_count = iteration_count;
-      // Found a valid path, return immediately.
-      return std::move(out_result_);
+    if (path_is_good) {
+      valid_path_count_++;
+      if (valid_path_limit_ > 0 && valid_path_count_ == valid_path_limit_) {
+        out_result_.iteration_count = iteration_count;
+        // Found enough paths, return immediately.
+        return std::move(out_result_);
+      }
     }
     // Path did not verify. Try more paths.
   }

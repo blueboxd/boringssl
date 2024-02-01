@@ -150,8 +150,8 @@ void VerifyTimeValidity(const ParsedCertificate &cert,
 // compatibility sake.
 bool VerifySignatureAlgorithmsMatch(const ParsedCertificate &cert,
                                     CertErrors *errors) {
-  const der::Input &alg1_tlv = cert.signature_algorithm_tlv();
-  const der::Input &alg2_tlv = cert.tbs().signature_algorithm_tlv;
+  der::Input alg1_tlv = cert.signature_algorithm_tlv();
+  der::Input alg2_tlv = cert.tbs().signature_algorithm_tlv;
 
   // Ensure that the two DER-encoded signature algorithms are byte-for-byte
   // equal.
@@ -202,7 +202,6 @@ void VerifyExtendedKeyUsage(const ParsedCertificate &cert,
   bool has_code_signing_eku = false;
   bool has_time_stamping_eku = false;
   bool has_ocsp_signing_eku = false;
-  bool has_nsgc = false;
   if (cert.has_extended_key_usage()) {
     for (const auto &key_purpose_oid : cert.extended_key_usage()) {
       if (key_purpose_oid == der::Input(kAnyEKU)) {
@@ -222,9 +221,6 @@ void VerifyExtendedKeyUsage(const ParsedCertificate &cert,
       }
       if (key_purpose_oid == der::Input(kOCSPSigning)) {
         has_ocsp_signing_eku = true;
-      }
-      if (key_purpose_oid == der::Input(kNetscapeServerGatedCrypto)) {
-        has_nsgc = true;
       }
     }
   }
@@ -304,7 +300,6 @@ void VerifyExtendedKeyUsage(const ParsedCertificate &cert,
       return;
     case KeyPurpose::SERVER_AUTH:
     case KeyPurpose::SERVER_AUTH_STRICT: {
-      bool nsgc_hack = false;
       if (has_any_eku && !has_server_auth_eku) {
         if (is_target_cert || is_target_cert_issuer) {
           errors->AddWarning(cert_errors::kEkuLacksServerAuthButHasAnyEKU);
@@ -318,29 +313,10 @@ void VerifyExtendedKeyUsage(const ParsedCertificate &cert,
         // TODO(bbe): remove this once BR requirements catch up with CA's.
         has_server_auth_eku = true;
       }
-      if (has_nsgc && !has_server_auth_eku) {
-        errors->AddWarning(cert_errors::kEkuLacksServerAuthButHasGatedCrypto);
-
-        // Allow NSGC for legacy RSA SHA1 intermediates, for compatibility
-        // with platform verifiers.
-        //
-        // In practice the chain will be rejected with or without this
-        // compatibility hack. The difference is whether the final error will
-        // be ERR_CERT_WEAK_SIGNATURE_ALGORITHM  (with compatibility hack) vs
-        // ERR_CERT_INVALID (without hack).
-        //
-        // TODO(https://crbug.com/843735): Remove this once error-for-error
-        // equivalence between builtin verifier and platform verifier is less
-        // important.
-        if ((cert.has_basic_constraints() && cert.basic_constraints().is_ca) &&
-            cert.signature_algorithm() == SignatureAlgorithm::kRsaPkcs1Sha1) {
-          nsgc_hack = true;
-        }
-      }
       if (required_key_purpose == KeyPurpose::SERVER_AUTH) {
         // Legacy compatible.
         if (cert.has_extended_key_usage() && !has_server_auth_eku &&
-            !has_any_eku && !nsgc_hack) {
+            !has_any_eku) {
           errors->AddError(cert_errors::kEkuLacksServerAuth);
         }
       } else {
@@ -714,7 +690,7 @@ class PathVerifier {
   // Parses |spki| to an EVP_PKEY and checks whether the public key is accepted
   // by |delegate_|. On failure parsing returns nullptr. If either parsing the
   // key or key policy failed, adds a high-severity error to |errors|.
-  bssl::UniquePtr<EVP_PKEY> ParseAndCheckPublicKey(const der::Input &spki,
+  bssl::UniquePtr<EVP_PKEY> ParseAndCheckPublicKey(der::Input spki,
                                                    CertErrors *errors);
 
   ValidPolicyGraph valid_policy_graph_;
@@ -823,7 +799,7 @@ void PathVerifier::VerifyPolicies(const ParsedCertificate &cert,
     //          for policy P and P-Q denote the qualifier set for policy
     //          P.  Perform the following steps in order:
     bool cert_has_any_policy = false;
-    for (const der::Input &p_oid : cert.policy_oids()) {
+    for (der::Input p_oid : cert.policy_oids()) {
       if (p_oid == der::Input(kAnyPolicyOid)) {
         cert_has_any_policy = true;
         continue;
@@ -1455,7 +1431,7 @@ void PathVerifier::ProcessSingleCertChain(const ParsedCertificate &cert,
 }
 
 bssl::UniquePtr<EVP_PKEY> PathVerifier::ParseAndCheckPublicKey(
-    const der::Input &spki, CertErrors *errors) {
+    der::Input spki, CertErrors *errors) {
   // Parse the public key.
   bssl::UniquePtr<EVP_PKEY> pkey;
   if (!ParsePublicKey(spki, &pkey)) {

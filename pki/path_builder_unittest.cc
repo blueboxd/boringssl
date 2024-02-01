@@ -21,7 +21,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <openssl/pool.h>
-#include "testdata/test_certificate_data.h"
 
 namespace bssl {
 
@@ -30,13 +29,7 @@ namespace bssl {
 namespace {
 
 using ::testing::_;
-using ::testing::ElementsAre;
-using ::testing::Exactly;
 using ::testing::Invoke;
-using ::testing::NiceMock;
-using ::testing::Return;
-using ::testing::SaveArg;
-using ::testing::SetArgPointee;
 using ::testing::StrictMock;
 
 class TestPathBuilderDelegate : public SimplePathBuilderDelegate {
@@ -65,6 +58,24 @@ class TestPathBuilderDelegate : public SimplePathBuilderDelegate {
   bool deadline_is_expired_ = false;
   bool use_signature_cache_ = false;
   MockSignatureVerifyCache cache_;
+};
+
+class CertPathBuilderDelegateBase : public SimplePathBuilderDelegate {
+ public:
+  CertPathBuilderDelegateBase()
+      : SimplePathBuilderDelegate(
+            1024, SimplePathBuilderDelegate::DigestPolicy::kWeakAllowSha1) {}
+  void CheckPathAfterVerification(const CertPathBuilder &path_builder,
+                                  CertPathBuilderResultPath *path) override {
+    ADD_FAILURE() << "Tests must override this";
+  }
+};
+
+class MockPathBuilderDelegate : public CertPathBuilderDelegateBase {
+ public:
+  MOCK_METHOD2(CheckPathAfterVerification,
+               void(const CertPathBuilder &path_builder,
+                    CertPathBuilderResultPath *path));
 };
 
 // AsyncCertIssuerSourceStatic always returns its certs asynchronously.
@@ -139,7 +150,7 @@ class AsyncCertIssuerSourceStatic : public CertIssuerSource {
     std::shared_ptr<const ParsedCertificate> *result) {
   std::string der;
   ::testing::AssertionResult r = ReadTestPem(
-      "testdata/ssl/certificates/" + file_name, "CERTIFICATE", &der);
+      "testdata/path_builder_unittest/" + file_name, "CERTIFICATE", &der);
   if (!r) {
     return r;
   }
@@ -635,8 +646,13 @@ TEST_F(PathBuilderMultiRootTest, TestIterationLimit) {
   for (const bool insufficient_limit : {true, false}) {
     SCOPED_TRACE(insufficient_limit);
 
+    StrictMock<MockPathBuilderDelegate> mock_delegate;
+    // The CheckPathAfterVerification delegate should be called regardless if
+    // the iteration limit is reached.
+    EXPECT_CALL(mock_delegate, CheckPathAfterVerification(_, _));
+
     CertPathBuilder path_builder(
-        a_by_b_, &trust_store, &delegate_, time_, KeyPurpose::ANY_EKU,
+        a_by_b_, &trust_store, &mock_delegate, time_, KeyPurpose::ANY_EKU,
         initial_explicit_policy_, user_initial_policy_set_,
         initial_policy_mapping_inhibit_, initial_any_policy_inhibit_);
     path_builder.AddCertIssuerSource(&sync_certs);
@@ -1336,6 +1352,93 @@ TEST_F(PathBuilderKeyRolloverTest, ExploreAllPathsWithIterationLimit) {
   }
 }
 
+// Tests that when SetValidPathLimit is used path builder returns the number of
+// valid paths we expect before the valid path limit was reached.
+TEST_F(PathBuilderKeyRolloverTest, ExplorePathsWithPathLimit) {
+  struct Expectation {
+    size_t valid_path_limit;
+    size_t expected_num_paths;
+  } kExpectations[] = {
+      {0, 4},  // No path limit. Three valid, one partial path should be built
+      {1, 1},  // One valid path
+      {2, 3},  // Two valid, one partial
+      {3, 4}, {4, 4}, {5, 4},
+  };
+
+  // Trust both old and new roots.
+  TrustStoreInMemory trust_store;
+  trust_store.AddTrustAnchor(oldroot_);
+  trust_store.AddTrustAnchor(newroot_);
+
+  // Intermediates and root rollover are all provided synchronously.
+  CertIssuerSourceStatic sync_certs;
+  sync_certs.AddCert(oldintermediate_);
+  sync_certs.AddCert(newintermediate_);
+
+  for (const auto &expectation : kExpectations) {
+    SCOPED_TRACE(expectation.valid_path_limit);
+
+    CertPathBuilder path_builder(
+        target_, &trust_store, &delegate_, time_, KeyPurpose::ANY_EKU,
+        initial_explicit_policy_, user_initial_policy_set_,
+        initial_policy_mapping_inhibit_, initial_any_policy_inhibit_);
+    path_builder.AddCertIssuerSource(&sync_certs);
+
+    // Stop after finding enough valid paths.
+    path_builder.SetValidPathLimit(expectation.valid_path_limit);
+
+    auto result = path_builder.Run();
+
+    EXPECT_TRUE(result.HasValidPath());
+    ASSERT_EQ(expectation.expected_num_paths, result.paths.size());
+
+    if (result.paths.size() > 0) {
+      // Path builder will first build path: target <- newintermediate <-
+      // newroot
+      const auto &path0 = *result.paths[0];
+      EXPECT_TRUE(path0.IsValid());
+      ASSERT_EQ(3U, path0.certs.size());
+      EXPECT_EQ(target_, path0.certs[0]);
+      EXPECT_EQ(newintermediate_, path0.certs[1]);
+      EXPECT_EQ(newroot_, path0.certs[2]);
+      EXPECT_EQ(3U, result.max_depth_seen);
+    }
+
+    if (result.paths.size() > 1) {
+      // Next path:  target <- newintermediate <- oldroot
+      const auto &path1 = *result.paths[1];
+      EXPECT_FALSE(path1.IsValid());
+      ASSERT_EQ(3U, path1.certs.size());
+      EXPECT_EQ(target_, path1.certs[0]);
+      EXPECT_EQ(newintermediate_, path1.certs[1]);
+      EXPECT_EQ(oldroot_, path1.certs[2]);
+      EXPECT_EQ(3U, result.max_depth_seen);
+    }
+
+    if (result.paths.size() > 2) {
+      // Next path:  target <- oldintermediate <- oldroot
+      const auto &path2 = *result.paths[2];
+      EXPECT_TRUE(path2.IsValid());
+      ASSERT_EQ(3U, path2.certs.size());
+      EXPECT_EQ(target_, path2.certs[0]);
+      EXPECT_EQ(oldintermediate_, path2.certs[1]);
+      EXPECT_EQ(oldroot_, path2.certs[2]);
+      EXPECT_EQ(3U, result.max_depth_seen);
+    }
+
+    if (result.paths.size() > 3) {
+      // Final path:  target <- oldintermediate <- newroot
+      const auto &path3 = *result.paths[3];
+      EXPECT_FALSE(path3.IsValid());
+      ASSERT_EQ(3U, path3.certs.size());
+      EXPECT_EQ(target_, path3.certs[0]);
+      EXPECT_EQ(oldintermediate_, path3.certs[1]);
+      EXPECT_EQ(newroot_, path3.certs[2]);
+      EXPECT_EQ(3U, result.max_depth_seen);
+    }
+  }
+}
+
 // If the target cert is a trust anchor, however is not itself *signed* by a
 // trust anchor, then it is not considered valid (the SPKI and name of the
 // trust anchor matches the SPKI and subject of the targe certificate, but the
@@ -1418,9 +1521,9 @@ TEST_F(PathBuilderKeyRolloverTest, TestDuplicateIntermediates) {
   // Create a separate copy of oldintermediate.
   std::shared_ptr<const ParsedCertificate> oldintermediate_dupe(
       ParsedCertificate::Create(
-          bssl::UniquePtr<CRYPTO_BUFFER>(CRYPTO_BUFFER_new(
-              oldintermediate_->der_cert().UnsafeData(),
-              oldintermediate_->der_cert().Length(), nullptr)),
+          bssl::UniquePtr<CRYPTO_BUFFER>(
+              CRYPTO_BUFFER_new(oldintermediate_->der_cert().data(),
+                                oldintermediate_->der_cert().size(), nullptr)),
           {}, nullptr));
 
   // Only newroot is a trusted root.
@@ -1485,8 +1588,8 @@ TEST_F(PathBuilderKeyRolloverTest, TestDuplicateIntermediateAndRoot) {
   std::shared_ptr<const ParsedCertificate> newroot_dupe(
       ParsedCertificate::Create(
           bssl::UniquePtr<CRYPTO_BUFFER>(
-              CRYPTO_BUFFER_new(newroot_->der_cert().UnsafeData(),
-                                newroot_->der_cert().Length(), nullptr)),
+              CRYPTO_BUFFER_new(newroot_->der_cert().data(),
+                                newroot_->der_cert().size(), nullptr)),
           {}, nullptr));
 
   // Only newroot is a trusted root.
@@ -1679,9 +1782,9 @@ TEST_F(PathBuilderKeyRolloverTest, TestDuplicateAsyncIntermediates) {
 
   std::shared_ptr<const ParsedCertificate> oldintermediate_dupe(
       ParsedCertificate::Create(
-          bssl::UniquePtr<CRYPTO_BUFFER>(CRYPTO_BUFFER_new(
-              oldintermediate_->der_cert().UnsafeData(),
-              oldintermediate_->der_cert().Length(), nullptr)),
+          bssl::UniquePtr<CRYPTO_BUFFER>(
+              CRYPTO_BUFFER_new(oldintermediate_->der_cert().data(),
+                                oldintermediate_->der_cert().size(), nullptr)),
           {}, nullptr));
 
   EXPECT_CALL(*target_issuers_req, GetNext(_))
@@ -1878,24 +1981,6 @@ TEST_F(PathBuilderDistrustTest, TargetIntermediateRoot) {
 // what CheckPathAfterVerification() does.
 class PathBuilderCheckPathAfterVerificationTest
     : public PathBuilderSimpleChainTest {};
-
-class CertPathBuilderDelegateBase : public SimplePathBuilderDelegate {
- public:
-  CertPathBuilderDelegateBase()
-      : SimplePathBuilderDelegate(
-            1024, SimplePathBuilderDelegate::DigestPolicy::kWeakAllowSha1) {}
-  void CheckPathAfterVerification(const CertPathBuilder &path_builder,
-                                  CertPathBuilderResultPath *path) override {
-    ADD_FAILURE() << "Tests must override this";
-  }
-};
-
-class MockPathBuilderDelegate : public CertPathBuilderDelegateBase {
- public:
-  MOCK_METHOD2(CheckPathAfterVerification,
-               void(const CertPathBuilder &path_builder,
-                    CertPathBuilderResultPath *path));
-};
 
 TEST_F(PathBuilderCheckPathAfterVerificationTest, NoOpToValidPath) {
   StrictMock<MockPathBuilderDelegate> delegate;
@@ -2264,7 +2349,7 @@ TEST(PathBuilderPrioritizationTest, TrustAndKeyIdPrioritization) {
         target, &trust_store, &delegate, verify_time, KeyPurpose::ANY_EKU,
         InitialExplicitPolicy::kFalse, {der::Input(kAnyPolicyOid)},
         InitialPolicyMappingInhibit::kFalse, InitialAnyPolicyInhibit::kFalse);
-    path_builder.SetExploreAllPaths(true);
+    path_builder.SetValidPathLimit(0);
 
     CertPathBuilder::Result result = path_builder.Run();
     EXPECT_TRUE(result.HasValidPath());
@@ -2440,7 +2525,7 @@ TEST(PathBuilderPrioritizationTest, SelfIssuedPrioritization) {
       target, &trust_store, &delegate, verify_time, KeyPurpose::ANY_EKU,
       InitialExplicitPolicy::kFalse, {der::Input(kAnyPolicyOid)},
       InitialPolicyMappingInhibit::kFalse, InitialAnyPolicyInhibit::kFalse);
-  path_builder.SetExploreAllPaths(true);
+  path_builder.SetValidPathLimit(0);
 
   CertPathBuilder::Result result = path_builder.Run();
   EXPECT_TRUE(result.HasValidPath());
