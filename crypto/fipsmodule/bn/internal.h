@@ -409,7 +409,7 @@ OPENSSL_INLINE int bn_mulx_adx_capable(void) {
 int bn_mul_mont_nohw(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
                      const BN_ULONG *np, const BN_ULONG *n0, size_t num);
 OPENSSL_INLINE int bn_mul4x_mont_capable(size_t num) {
-  return (num >= 8) && ((num & 3) == 0);
+  return num >= 8 && (num & 3) == 0;
 }
 int bn_mul4x_mont(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
                   const BN_ULONG *np, const BN_ULONG *n0, size_t num);
@@ -419,13 +419,21 @@ OPENSSL_INLINE int bn_mulx4x_mont_capable(size_t num) {
 int bn_mulx4x_mont(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
                    const BN_ULONG *np, const BN_ULONG *n0, size_t num);
 OPENSSL_INLINE int bn_sqr8x_mont_capable(size_t num) {
-  return (num >= 8) && ((num & 7) == 0);
+  return num >= 8 && (num & 7) == 0;
 }
 int bn_sqr8x_mont(BN_ULONG *rp, const BN_ULONG *ap, BN_ULONG mulx_adx_capable,
                   const BN_ULONG *np, const BN_ULONG *n0, size_t num);
-#endif // defined(OPENSSL_X86_64)
-
+#elif defined(OPENSSL_ARM)
+OPENSSL_INLINE int bn_mul8x_mont_neon_capable(size_t num) {
+  return (num & 7) == 0 && CRYPTO_is_NEON_capable();
+}
+int bn_mul8x_mont_neon(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
+                       const BN_ULONG *np, const BN_ULONG *n0, size_t num);
+int bn_mul_mont_nohw(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
+                     const BN_ULONG *np, const BN_ULONG *n0, size_t num);
 #endif
+
+#endif  // OPENSSL_BN_ASM_MONT
 
 #if !defined(OPENSSL_NO_ASM) && defined(OPENSSL_X86_64)
 #define OPENSSL_BN_ASM_MONT5
@@ -793,8 +801,8 @@ void bn_mod_inverse0_prime_mont_small(BN_ULONG *r, const BN_ULONG *a,
 
 // bn_big_endian_to_words interprets |in_len| bytes from |in| as a big-endian,
 // unsigned integer and writes the result to |out_len| words in |out|. |out_len|
-// must be large enough to represent any |in_len|-byte value. That is, |out_len|
-// must be at least |BN_BYTES * in_len|.
+// must be large enough to represent any |in_len|-byte value. That is, |in_len|
+// must be at most |BN_BYTES * out_len|.
 void bn_big_endian_to_words(BN_ULONG *out, size_t out_len, const uint8_t *in,
                             size_t in_len);
 
