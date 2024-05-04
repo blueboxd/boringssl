@@ -1409,14 +1409,7 @@ int X509_STORE_CTX_get_ex_new_index(long argl, void *argp,
                                     CRYPTO_EX_unused *unused,
                                     CRYPTO_EX_dup *dup_unused,
                                     CRYPTO_EX_free *free_func) {
-  // This function is (usually) called only once, by
-  // SSL_get_ex_data_X509_STORE_CTX_idx (ssl/ssl_cert.c).
-  int index;
-  if (!CRYPTO_get_ex_new_index(&g_ex_data_class, &index, argl, argp,
-                               free_func)) {
-    return -1;
-  }
-  return index;
+  return CRYPTO_get_ex_new_index_ex(&g_ex_data_class, argl, argp, free_func);
 }
 
 int X509_STORE_CTX_set_ex_data(X509_STORE_CTX *ctx, int idx, void *data) {
@@ -1485,13 +1478,13 @@ int X509_STORE_CTX_set_purpose(X509_STORE_CTX *ctx, int purpose) {
     return 1;
   }
 
-  int idx = X509_PURPOSE_get_by_id(purpose);
-  if (idx == -1) {
+  const X509_PURPOSE *pobj = X509_PURPOSE_get0(purpose);
+  if (pobj == NULL) {
     OPENSSL_PUT_ERROR(X509, X509_R_UNKNOWN_PURPOSE_ID);
     return 0;
   }
 
-  int trust = X509_PURPOSE_get_trust(X509_PURPOSE_get0(idx));
+  int trust = X509_PURPOSE_get_trust(pobj);
   if (!X509_STORE_CTX_set_trust(ctx, trust)) {
     return 0;
   }
@@ -1508,7 +1501,7 @@ int X509_STORE_CTX_set_trust(X509_STORE_CTX *ctx, int trust) {
     return 1;
   }
 
-  if (X509_TRUST_get_by_id(trust) == -1) {
+  if (!X509_is_valid_trust_id(trust)) {
     OPENSSL_PUT_ERROR(X509, X509_R_UNKNOWN_TRUST_ID);
     return 0;
   }
