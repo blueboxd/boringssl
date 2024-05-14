@@ -38,8 +38,9 @@
 #include <openssl/ecdsa.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/experimental/kyber.h>
+#include <openssl/experimental/spx.h>
 #include <openssl/hrss.h>
-#include <openssl/kyber.h>
 #include <openssl/mem.h>
 #include <openssl/nid.h>
 #include <openssl/rand.h>
@@ -67,7 +68,6 @@ OPENSSL_MSVC_PRAGMA(warning(pop))
 #include "../crypto/fipsmodule/ec/internal.h"
 #include "../crypto/internal.h"
 #include "../crypto/trust_token/internal.h"
-#include "../crypto/spx/internal.h"
 #include "internal.h"
 
 // g_print_json is true if printed output is JSON formatted.
@@ -1094,8 +1094,8 @@ static bool SpeedKyber(const std::string &selected) {
         KYBER_private_key priv;
         uint8_t encoded_public_key[KYBER_PUBLIC_KEY_BYTES];
         KYBER_generate_key(encoded_public_key, &priv);
-        uint8_t shared_secret[32];
-        KYBER_decap(shared_secret, sizeof(shared_secret), ciphertext, &priv);
+        uint8_t shared_secret[KYBER_SHARED_SECRET_BYTES];
+        KYBER_decap(shared_secret, ciphertext, &priv);
         return true;
       })) {
     fprintf(stderr, "Failed to time KYBER_generate_key + KYBER_decap.\n");
@@ -1115,8 +1115,8 @@ static bool SpeedKyber(const std::string &selected) {
         if (!KYBER_parse_public_key(&pub, &encoded_public_key_cbs)) {
           return false;
         }
-        uint8_t shared_secret[32];
-        KYBER_encap(ciphertext, shared_secret, sizeof(shared_secret), &pub);
+        uint8_t shared_secret[KYBER_SHARED_SECRET_BYTES];
+        KYBER_encap(ciphertext, shared_secret, &pub);
         return true;
       })) {
     fprintf(stderr, "Failed to time KYBER_encap.\n");
