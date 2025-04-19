@@ -14,6 +14,28 @@
 #include <openssl/base.h>
 #include <openssl/span.h>
 
+#if defined(__has_include)
+#if __has_include(<version>)
+#include <version>
+#endif
+#endif
+
+#if defined(__cpp_lib_ranges) && __cpp_lib_ranges >= 201911L
+#include <ranges>
+namespace bssl::der {
+class OPENSSL_EXPORT Input;
+}
+
+// Mark `Input` as satisfying the `view` and `borrowed_range` concepts. This
+// should be done before the definition of `Input`, so that any inlined calls to
+// range functionality use the correct specializations.
+template <>
+inline constexpr bool std::ranges::enable_view<bssl::der::Input> = true;
+template <>
+inline constexpr bool std::ranges::enable_borrowed_range<bssl::der::Input> =
+    true;
+#endif
+
 namespace bssl::der {
 
 // An opaque class that represents a fixed buffer of data of a fixed length,
@@ -42,16 +64,14 @@ class OPENSSL_EXPORT Input {
 
   // Creates an Input from the given |data| and |len|.
   constexpr explicit Input(const uint8_t *data, size_t len)
-      : data_(MakeConstSpan(data, len)) {}
+      : data_(Span(data, len)) {}
 
   // Deprecated: Use StringAsBytes.
   //
   // Creates an Input from a std::string_view. The constructed Input is only
   // valid as long as |data| points to live memory. If constructed from, say, a
   // |std::string|, mutating the vector will invalidate the Input.
-  explicit Input(std::string_view str)
-      : data_(MakeConstSpan(reinterpret_cast<const uint8_t *>(str.data()),
-                            str.size())) {}
+  explicit Input(std::string_view str) : data_(StringAsBytes(str)) {}
 
   // The following APIs have the same semantics as in |bssl::Span|.
   constexpr Span<const uint8_t>::iterator begin() const {
